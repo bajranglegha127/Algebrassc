@@ -1,0 +1,6 @@
+{
+  "name": "e1 Algebra PYQ — 548 Questions Practice & Cutter",
+  "description": "Complete 548-question Algebra Previous Year Questions (Q.1 to Q.548) in strict order with cut question image view, exam-wise categorization (SSC CGL Tier 1 & 2, CHSL, CPO, MTS, CDS, Railway), auto-advance on correct selection, and official Answer Key verification.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
