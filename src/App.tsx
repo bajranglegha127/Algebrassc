@@ -9,6 +9,10 @@ import {
   RotateCcw,
   FastForward,
   BookOpen,
+  Play,
+  Pause,
+  Timer,
+  Clock,
 } from 'lucide-react';
 import {
   ALL_QUESTIONS,
@@ -24,6 +28,23 @@ import bannerImg from './assets/images/algebra_exam_banner_1790608921763.jpg';
 const STORAGE_KEY_RESPONSES = 'e1_algebra_548_responses_v1';
 const STORAGE_KEY_CURRENT_ID = 'e1_algebra_548_current_id_v1';
 const STORAGE_KEY_CROPS = 'e1_algebra_548_custom_crops_v1';
+const STORAGE_KEY_TOTAL_TIME = 'e1_algebra_548_total_seconds_v1';
+const STORAGE_KEY_QUESTION_TIMES = 'e1_algebra_548_question_times_v1';
+
+function formatDuration(totalSeconds: number, includeHours = false): string {
+  const secs = Math.max(0, Math.floor(totalSeconds));
+  const hours = Math.floor(secs / 3600);
+  const minutes = Math.floor((secs % 3600) / 60);
+  const seconds = secs % 60;
+
+  const mm = String(minutes).padStart(2, '0');
+  const ss = String(seconds).padStart(2, '0');
+  if (includeHours || hours > 0) {
+    const hh = String(hours).padStart(2, '0');
+    return `${hh}:${mm}:${ss}`;
+  }
+  return `${mm}:${ss}`;
+}
 
 export default function App() {
   // Filter state: 'ALL' or one of the 7 Exam Categories
@@ -62,6 +83,33 @@ export default function App() {
     }
   });
 
+  // TIMER STATES: Total Session Timer & Per-Question Timer
+  const [isTimerRunning, setIsTimerRunning] = useState<boolean>(false);
+  const [totalSeconds, setTotalSeconds] = useState<number>(() => {
+    try {
+      const saved = localStorage.getItem(STORAGE_KEY_TOTAL_TIME);
+      return saved ? Math.max(0, parseInt(saved, 10) || 0) : 0;
+    } catch {
+      return 0;
+    }
+  });
+
+  // Recorded seconds per question ID (1 to 548)
+  const [questionTimes, setQuestionTimes] = useState<Record<number, number>>(() => {
+    try {
+      const saved = localStorage.getItem(STORAGE_KEY_QUESTION_TIMES);
+      return saved ? JSON.parse(saved) : {};
+    } catch {
+      return {};
+    }
+  });
+
+  // Current active question's live elapsed seconds
+  const [currentQuestionSeconds, setCurrentQuestionSeconds] = useState<number>(0);
+
+  // Optional target limit per question in seconds (0 = Stopwatch only, or 30s / 45s / 60s / 90s)
+  const [targetPerQuestionSec, setTargetPerQuestionSec] = useState<number>(60);
+
   // Controls whether options are also shown inside the Cut Question Image
   const [showOptionsInCut, setShowOptionsInCut] = useState<boolean>(true);
 
@@ -73,7 +121,7 @@ export default function App() {
 
   const autoNextTimerRef = useRef<number | null>(null);
 
-  // Persist user progress
+  // Persist user progress & timers
   useEffect(() => {
     try {
       localStorage.setItem(STORAGE_KEY_RESPONSES, JSON.stringify(userResponses));
@@ -90,7 +138,23 @@ export default function App() {
     }
   }, [currentQuestionId]);
 
-  // Clear pending timer on unmount or question change
+  useEffect(() => {
+    try {
+      localStorage.setItem(STORAGE_KEY_TOTAL_TIME, String(totalSeconds));
+    } catch {
+      // ignore
+    }
+  }, [totalSeconds]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(STORAGE_KEY_QUESTION_TIMES, JSON.stringify(questionTimes));
+    } catch {
+      // ignore
+    }
+  }, [questionTimes]);
+
+  // Clear pending auto-next timer on unmount
   useEffect(() => {
     return () => {
       if (autoNextTimerRef.current) {
@@ -99,7 +163,7 @@ export default function App() {
     };
   }, []);
 
-  // Strictly ordered list of questions matching current Exam Category & filters
+  // Strict-order filtered questions
   const filteredQuestions: QuestionItem[] = useMemo(() => {
     return ALL_QUESTIONS.filter((q) => {
       if (selectedExam !== 'ALL' && q.examCategory !== selectedExam) {
@@ -133,6 +197,33 @@ export default function App() {
     return ALL_QUESTIONS[currentQuestionId - 1] || ALL_QUESTIONS[0];
   }, [filteredQuestions, currentQuestionId]);
 
+  // Sync currentQuestionSeconds when switching to a different question
+  useEffect(() => {
+    setCurrentQuestionSeconds(questionTimes[activeQuestion.id] || 0);
+  }, [activeQuestion.id]);
+
+  // 1-second interval tick for both Per-Question Timer and Total Session Timer
+  useEffect(() => {
+    if (!isTimerRunning) return;
+
+    const interval = window.setInterval(() => {
+      setTotalSeconds((prev) => prev + 1);
+
+      // Only increment the per-question timer if the current question hasn't been answered yet
+      // (or keep ticking if user explicitly restarted question timer)
+      setCurrentQuestionSeconds((prev) => {
+        const nextVal = prev + 1;
+        setQuestionTimes((prevMap) => ({
+          ...prevMap,
+          [activeQuestion.id]: nextVal,
+        }));
+        return nextVal;
+      });
+    }, 1000);
+
+    return () => window.clearInterval(interval);
+  }, [isTimerRunning, activeQuestion.id]);
+
   const currentIndexInFiltered = useMemo(() => {
     return filteredQuestions.findIndex((q) => q.id === activeQuestion.id);
   }, [filteredQuestions, activeQuestion]);
@@ -160,14 +251,16 @@ export default function App() {
         else wrong++;
       }
     }
+    const avgTime = attempted > 0 ? Math.round(totalSeconds / attempted) : 0;
     return {
       total: ALL_QUESTIONS.length,
       attempted,
       correct,
       wrong,
       remaining: ALL_QUESTIONS.length - attempted,
+      avgTime,
     };
-  }, [userResponses]);
+  }, [userResponses, totalSeconds]);
 
   const goToNextQuestion = () => {
     if (autoNextTimerRef.current) {
@@ -195,6 +288,25 @@ export default function App() {
     } else if (activeQuestion.id > 1) {
       setCurrentQuestionId(activeQuestion.id - 1);
     }
+  };
+
+  // Start / Restart only the current question's timer (and ensure timer is running)
+  const handleStartCurrentQuestionTimer = () => {
+    setCurrentQuestionSeconds(0);
+    setQuestionTimes((prev) => ({
+      ...prev,
+      [activeQuestion.id]: 0,
+    }));
+    setIsTimerRunning(true);
+  };
+
+  const handleResetTimersOnly = () => {
+    setIsTimerRunning(false);
+    setTotalSeconds(0);
+    setCurrentQuestionSeconds(0);
+    setQuestionTimes({});
+    localStorage.removeItem(STORAGE_KEY_TOTAL_TIME);
+    localStorage.removeItem(STORAGE_KEY_QUESTION_TIMES);
   };
 
   // Core requirement:
@@ -235,7 +347,8 @@ export default function App() {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (
         document.activeElement instanceof HTMLInputElement ||
-        document.activeElement instanceof HTMLTextAreaElement
+        document.activeElement instanceof HTMLTextAreaElement ||
+        document.activeElement instanceof HTMLSelectElement
       ) {
         return;
       }
@@ -288,7 +401,13 @@ export default function App() {
     setUserResponses({});
     setCurrentQuestionId(1);
     setIsAutoAdvancing(false);
+    setIsTimerRunning(false);
+    setTotalSeconds(0);
+    setCurrentQuestionSeconds(0);
+    setQuestionTimes({});
     localStorage.removeItem(STORAGE_KEY_RESPONSES);
+    localStorage.removeItem(STORAGE_KEY_TOTAL_TIME);
+    localStorage.removeItem(STORAGE_KEY_QUESTION_TIMES);
   };
 
   const handleJumpSubmit = (e: React.FormEvent) => {
@@ -306,6 +425,10 @@ export default function App() {
   const selectedOptionForActive = userResponses[activeQuestion.id];
   const isAnswered = selectedOptionForActive !== undefined;
   const isSelectedCorrect = selectedOptionForActive === activeQuestion.answer;
+
+  // Determine if current question time has exceeded the target pace
+  const isOverTargetPace =
+    targetPerQuestionSec > 0 && currentQuestionSeconds > targetPerQuestionSec;
 
   // Determine which page of the Answer Key (47, 48, or 49) holds this question's key
   const answerKeySourcePage =
@@ -359,14 +482,14 @@ export default function App() {
             className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium text-white bg-slate-900 rounded-lg hover:bg-slate-800 transition-colors whitespace-nowrap"
           >
             <RotateCcw className="w-3.5 h-3.5" />
-            <span>Reset Progress</span>
+            <span>Reset All</span>
           </button>
         </div>
       </header>
 
       {/* Main Content Container (1440px desktop presence) */}
       <main className="flex-1 max-w-[1400px] w-full mx-auto px-4 sm:px-6 py-6 space-y-6">
-        {/* Compact Header Banner + Session Telemetry Bar */}
+        {/* Compact Header Banner + Session & Timer Bar */}
         <section className="relative rounded-xl overflow-hidden border border-slate-200 bg-slate-900 text-white">
           <img
             src={bannerImg}
@@ -374,42 +497,125 @@ export default function App() {
             referrerPolicy="no-referrer"
             className="absolute inset-0 w-full h-full object-cover opacity-25 pointer-events-none"
           />
-          <div className="absolute inset-0 bg-gradient-to-r from-slate-950/95 via-slate-900/85 to-slate-900/70 pointer-events-none" />
+          <div className="absolute inset-0 bg-gradient-to-r from-slate-950/95 via-slate-900/85 to-slate-900/75 pointer-events-none" />
 
-          <div className="relative z-10 px-6 py-5 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
-            <div className="space-y-1.5 max-w-2xl">
+          <div className="relative z-10 px-6 py-5 flex flex-col xl:flex-row xl:items-center xl:justify-between gap-5">
+            <div className="space-y-1.5 max-w-xl">
               <div className="flex flex-wrap items-center gap-2 text-xs text-slate-300 font-mono tabular-nums">
                 <span>Bhutesh Sir (e1 Coaching Center)</span>
                 <span aria-hidden="true">·</span>
                 <span>Complete 49-Page Algebra PDF</span>
                 <span aria-hidden="true">·</span>
-                <span>Strict Order Q.1 to Q.548 (Zero Leftovers)</span>
+                <span>Strict Order Q.1 to Q.548</span>
               </div>
               <h1 className="text-xl sm:text-2xl font-semibold tracking-tight text-white font-display">
                 Interactive Cut-Question Practice & Exam-Wise PYQ Classifier
               </h1>
             </div>
 
-            {/* Unboxed Tabular Session Metrics */}
-            <div className="flex flex-wrap items-center gap-6 text-xs font-mono tabular-nums border-t lg:border-t-0 pt-3 lg:pt-0 border-slate-800">
-              <div>
-                <span className="text-slate-400 block">Total Questions</span>
-                <span className="text-base font-semibold text-white">548 / 548</span>
+            {/* Dual Timer & Session Metrics Deck */}
+            <div className="flex flex-wrap items-center gap-4 sm:gap-5 text-xs font-mono tabular-nums border-t xl:border-t-0 pt-3.5 xl:pt-0 border-slate-800">
+              {/* Per-Question Timer Readout */}
+              <div className="bg-slate-950/70 border border-slate-800 rounded-lg px-3.5 py-2 flex items-center gap-3">
+                <Timer
+                  className={`w-4 h-4 shrink-0 ${
+                    isOverTargetPace
+                      ? 'text-amber-400'
+                      : isTimerRunning
+                      ? 'text-emerald-400'
+                      : 'text-slate-400'
+                  }`}
+                />
+                <div>
+                  <span className="text-[11px] text-slate-400 block">
+                    Question #{activeQuestion.id} Timer
+                  </span>
+                  <div className="flex items-baseline gap-1.5">
+                    <span
+                      className={`text-base font-bold ${
+                        isOverTargetPace ? 'text-amber-300' : 'text-white'
+                      }`}
+                    >
+                      {formatDuration(currentQuestionSeconds)}
+                    </span>
+                    {targetPerQuestionSec > 0 && (
+                      <span className="text-[11px] text-slate-400">
+                        / {formatDuration(targetPerQuestionSec)}
+                      </span>
+                    )}
+                  </div>
+                </div>
               </div>
-              <span className="text-slate-700" aria-hidden="true">/</span>
-              <div>
-                <span className="text-slate-400 block">● Correct</span>
-                <span className="text-base font-semibold text-emerald-400">{stats.correct}</span>
+
+              {/* Total Session Timer Readout */}
+              <div className="bg-slate-950/70 border border-slate-800 rounded-lg px-3.5 py-2 flex items-center gap-3">
+                <Clock
+                  className={`w-4 h-4 shrink-0 ${
+                    isTimerRunning ? 'text-sky-400' : 'text-slate-400'
+                  }`}
+                />
+                <div>
+                  <span className="text-[11px] text-slate-400 block">
+                    Total Timer (Avg: {stats.avgTime}s/Q)
+                  </span>
+                  <span className="text-base font-bold text-sky-300">
+                    {formatDuration(totalSeconds, true)}
+                  </span>
+                </div>
               </div>
-              <span className="text-slate-700" aria-hidden="true">/</span>
-              <div>
-                <span className="text-slate-400 block">▲ Wrong</span>
-                <span className="text-base font-semibold text-rose-400">{stats.wrong}</span>
+
+              {/* Start / Pause & Reset Timer Buttons */}
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setIsTimerRunning((prev) => !prev)}
+                  className={`inline-flex items-center gap-1.5 px-3.5 py-2.5 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap cursor-pointer ${
+                    isTimerRunning
+                      ? 'bg-amber-500 text-slate-950 hover:bg-amber-400'
+                      : 'bg-emerald-600 text-white hover:bg-emerald-500'
+                  }`}
+                >
+                  {isTimerRunning ? (
+                    <>
+                      <Pause className="w-3.5 h-3.5 fill-current" />
+                      <span>Pause Timers</span>
+                    </>
+                  ) : (
+                    <>
+                      <Play className="w-3.5 h-3.5 fill-current" />
+                      <span>Start Timers</span>
+                    </>
+                  )}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handleResetTimersOnly}
+                  title="Reset Per-Question & Total Timers"
+                  className="px-2.5 py-2.5 rounded-lg border border-slate-700 bg-slate-800/80 text-slate-300 hover:text-white hover:bg-slate-800 transition-colors whitespace-nowrap cursor-pointer"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
+                </button>
               </div>
-              <span className="text-slate-700" aria-hidden="true">/</span>
-              <div>
-                <span className="text-slate-400 block">Remaining</span>
-                <span className="text-base font-semibold text-sky-300">{stats.remaining}</span>
+
+              <span className="hidden sm:inline text-slate-700" aria-hidden="true">|</span>
+
+              {/* Score Summary */}
+              <div className="flex items-center gap-4">
+                <div>
+                  <span className="text-slate-400 block">● Correct</span>
+                  <span className="text-base font-semibold text-emerald-400">{stats.correct}</span>
+                </div>
+                <span className="text-slate-700" aria-hidden="true">/</span>
+                <div>
+                  <span className="text-slate-400 block">▲ Wrong</span>
+                  <span className="text-base font-semibold text-rose-400">{stats.wrong}</span>
+                </div>
+                <span className="text-slate-700" aria-hidden="true">/</span>
+                <div>
+                  <span className="text-slate-400 block">Left</span>
+                  <span className="text-base font-semibold text-white">{stats.remaining}</span>
+                </div>
               </div>
             </div>
           </div>
@@ -425,18 +631,39 @@ export default function App() {
               </span>
             </div>
 
-            <div className="flex items-center gap-2 text-xs text-slate-600 font-mono">
-              <span>Auto-Next on Correct:</span>
-              <button
-                type="button"
-                onClick={() =>
-                  setAutoNextDelayMs((prev) => (prev === 650 ? 250 : prev === 250 ? 1200 : 650))
-                }
-                className="inline-flex items-center gap-1 px-2.5 py-1 rounded border border-slate-200 bg-white text-slate-800 hover:bg-slate-100 font-medium transition-colors whitespace-nowrap"
-              >
-                <FastForward className="w-3 h-3 text-sky-600" />
-                <span>{autoNextDelayMs}ms</span>
-              </button>
+            <div className="flex flex-wrap items-center gap-3 text-xs text-slate-600 font-mono">
+              {/* Target Time Per Question Selector */}
+              <div className="flex items-center gap-1.5">
+                <span>Target/Q:</span>
+                <select
+                  value={targetPerQuestionSec}
+                  onChange={(e) => setTargetPerQuestionSec(Number(e.target.value))}
+                  className="px-2 py-1 rounded border border-slate-200 bg-white text-slate-800 font-medium focus:outline-none focus:border-slate-900"
+                >
+                  <option value={0}>No Limit</option>
+                  <option value={30}>30s / Q</option>
+                  <option value={45}>45s / Q</option>
+                  <option value={60}>60s / Q</option>
+                  <option value={90}>90s / Q</option>
+                  <option value={120}>120s / Q</option>
+                </select>
+              </div>
+
+              <span aria-hidden="true">·</span>
+
+              <div className="flex items-center gap-1.5">
+                <span>Auto-Next on Correct:</span>
+                <button
+                  type="button"
+                  onClick={() =>
+                    setAutoNextDelayMs((prev) => (prev === 650 ? 250 : prev === 250 ? 1200 : 650))
+                  }
+                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded border border-slate-200 bg-white text-slate-800 hover:bg-slate-100 font-medium transition-colors whitespace-nowrap"
+                >
+                  <FastForward className="w-3 h-3 text-sky-600" />
+                  <span>{autoNextDelayMs}ms</span>
+                </button>
+              </div>
             </div>
           </div>
 
@@ -484,7 +711,7 @@ export default function App() {
         >
           {/* LEFT ZONE (8 cols): Cut Question Image + Interactive Options + Answer Key Verification */}
           <div className="lg:col-span-8 space-y-5">
-            {/* Navigation & Metadata Bar above Question */}
+            {/* Navigation & Per-Question Timer Bar above Question */}
             <div className="flex flex-wrap items-center justify-between gap-3 bg-white px-5 py-3.5 rounded-xl border border-slate-200">
               {/* Unboxed Static Metadata with Middle-Dot Separators */}
               <div className="flex flex-wrap items-center gap-2 text-xs text-slate-600 font-mono tabular-nums">
@@ -507,8 +734,43 @@ export default function App() {
                 )}
               </div>
 
-              {/* Prev / Jump / Next Controls */}
-              <div className="flex items-center gap-2">
+              {/* Per-Question Start Timer + Prev / Jump / Next Controls */}
+              <div className="flex flex-wrap items-center gap-2">
+                {/* Per-Question Timer Control Button */}
+                <div className="inline-flex items-center rounded-lg border border-slate-200 bg-slate-50 p-0.5 font-mono text-xs tabular-nums">
+                  <span
+                    className={`px-2.5 py-1 font-semibold ${
+                      isOverTargetPace
+                        ? 'text-amber-700'
+                        : isTimerRunning
+                        ? 'text-emerald-700'
+                        : 'text-slate-700'
+                    }`}
+                  >
+                    Q.{activeQuestion.id}: {formatDuration(currentQuestionSeconds)}
+                    {isOverTargetPace ? ' ▲' : ''}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setIsTimerRunning((prev) => !prev)}
+                    className={`px-2.5 py-1 rounded-md font-semibold transition-colors whitespace-nowrap cursor-pointer ${
+                      isTimerRunning
+                        ? 'bg-amber-500 text-slate-950 hover:bg-amber-400'
+                        : 'bg-slate-900 text-white hover:bg-slate-800'
+                    }`}
+                  >
+                    {isTimerRunning ? 'Pause' : 'Start Q Timer'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleStartCurrentQuestionTimer}
+                    title="Restart timer for this question from 00:00"
+                    className="px-2 py-1 text-slate-500 hover:text-slate-900 transition-colors cursor-pointer"
+                  >
+                    <RotateCcw className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+
                 <form onSubmit={handleJumpSubmit} className="flex items-center">
                   <input
                     type="number"
@@ -516,8 +778,8 @@ export default function App() {
                     max={548}
                     value={jumpInput}
                     onChange={(e) => setJumpInput(e.target.value)}
-                    placeholder="Go to # (1-548)"
-                    className="w-32 px-2.5 py-1.5 text-xs font-mono border border-slate-200 rounded-l-lg focus:outline-none focus:border-slate-900"
+                    placeholder="Go # (1-548)"
+                    className="w-28 px-2.5 py-1.5 text-xs font-mono border border-slate-200 rounded-l-lg focus:outline-none focus:border-slate-900"
                   />
                   <button
                     type="submit"
@@ -567,8 +829,8 @@ export default function App() {
                 <h2 className="text-sm font-semibold text-slate-900">
                   Select Your Answer Option (Keys: A, B, C, D or 1, 2, 3, 4)
                 </h2>
-                <span className="text-xs text-slate-500">
-                  Correct choice auto-advances to next question · Wrong choice reveals official Answer Key
+                <span className="text-xs text-slate-500 font-mono tabular-nums">
+                  Time on Q.{activeQuestion.id}: {formatDuration(currentQuestionSeconds)} · Total: {formatDuration(totalSeconds, true)}
                 </span>
               </div>
 
@@ -586,7 +848,6 @@ export default function App() {
 
                   if (isAnswered) {
                     if (isThisSelected && isSelectedCorrect) {
-                      // User picked the right answer
                       buttonStyle =
                         'border-emerald-600 bg-emerald-50/90 text-emerald-950 ring-2 ring-emerald-500/20';
                       badgeStyle = 'bg-emerald-600 border-emerald-600 text-white';
@@ -597,7 +858,6 @@ export default function App() {
                         </span>
                       );
                     } else if (isThisSelected && !isSelectedCorrect) {
-                      // User picked a wrong answer
                       buttonStyle =
                         'border-rose-600 bg-rose-50/90 text-rose-950 ring-2 ring-rose-500/20';
                       badgeStyle = 'bg-rose-600 border-rose-600 text-white';
@@ -608,7 +868,6 @@ export default function App() {
                         </span>
                       );
                     } else if (!isSelectedCorrect && isThisCorrectOption) {
-                      // Highlight the true answer from the Answer Key when user got it wrong
                       buttonStyle =
                         'border-emerald-600 bg-emerald-50/70 text-emerald-950';
                       badgeStyle = 'bg-emerald-600 border-emerald-600 text-white';
@@ -666,7 +925,7 @@ export default function App() {
                         <p className="text-xs text-emerald-800 font-mono mt-0.5">
                           {isAutoAdvancing
                             ? 'Advancing automatically to the next question in sequence...'
-                            : `Verified against End-of-Sheet Answer Key (PDF Page ${answerKeySourcePage}: ${activeQuestion.id}. ${activeQuestion.rawAnswerKey})`}
+                            : `Verified against End-of-Sheet Answer Key (PDF Page ${answerKeySourcePage}: ${activeQuestion.id}. ${activeQuestion.rawAnswerKey}) · Solved in ${formatDuration(currentQuestionSeconds)}`}
                         </p>
                       </div>
                     </div>
@@ -723,6 +982,9 @@ export default function App() {
                   Showing {filteredQuestions.length} of 548 questions in exact order
                 </p>
               </div>
+              <span className="text-xs font-mono text-slate-600 tabular-nums">
+                Total: {formatDuration(totalSeconds, true)}
+              </span>
             </div>
 
             {/* Search & Status Filter */}
@@ -766,6 +1028,7 @@ export default function App() {
             <div className="max-h-[420px] overflow-y-auto pr-1 grid grid-cols-6 sm:grid-cols-8 lg:grid-cols-6 gap-1.5 font-mono text-xs tabular-nums">
               {filteredQuestions.map((q) => {
                 const resp = userResponses[q.id];
+                const qSec = questionTimes[q.id];
                 const isCurr = q.id === activeQuestion.id;
                 let cellClass =
                   'border-slate-200 bg-slate-50 text-slate-700 hover:bg-slate-100';
@@ -795,7 +1058,7 @@ export default function App() {
                       setIsAutoAdvancing(false);
                       setCurrentQuestionId(q.id);
                     }}
-                    title={`Q.${q.id} (${q.examYearTag}) — Ans: ${q.answer}`}
+                    title={`Q.${q.id} (${q.examYearTag})${qSec ? ` · Time: ${formatDuration(qSec)}` : ''}`}
                     className={`py-2 rounded-lg border text-center transition-colors cursor-pointer ${cellClass}`}
                   >
                     {q.id}
@@ -804,11 +1067,11 @@ export default function App() {
               })}
             </div>
 
-            {/* Current Question List Preview */}
+            {/* Current Question List Preview with Per-Question Time */}
             <div className="pt-3 border-t border-slate-200 space-y-2">
               <div className="flex items-center justify-between text-xs text-slate-500">
                 <span>Upcoming in Sequence</span>
-                <span className="font-mono">Ans Key at End</span>
+                <span className="font-mono">Time / Status</span>
               </div>
               <div className="space-y-1.5 max-h-48 overflow-y-auto pr-1">
                 {filteredQuestions
@@ -818,6 +1081,7 @@ export default function App() {
                   )
                   .map((q) => {
                     const resp = userResponses[q.id];
+                    const qTime = questionTimes[q.id] || 0;
                     return (
                       <button
                         key={q.id}
@@ -834,6 +1098,7 @@ export default function App() {
                           {q.en}
                         </span>
                         <span className="font-mono text-[11px] text-slate-500 shrink-0">
+                          {qTime > 0 ? `${formatDuration(qTime)} · ` : ''}
                           {resp ? (resp === q.answer ? `✓ ${q.answer}` : `✗ Ans:${q.answer}`) : `Pg.${q.page}`}
                         </span>
                       </button>
